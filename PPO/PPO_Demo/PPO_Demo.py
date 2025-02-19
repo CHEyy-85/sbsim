@@ -27,6 +27,7 @@ import tensorflow as tf
 from tf_agents.agents.ppo import ppo_clip_agent
 from tf_agents.agents.ppo import ppo_actor_network
 from tf_agents.networks import value_network
+from tf_agents.environments import ActionClipWrapper
 
 from tf_agents.metrics import py_metrics
 from tf_agents.policies import greedy_policy
@@ -72,17 +73,17 @@ from env_utils import *
 
 def train_eval(
     # Training params
-    num_iterations=20,
+    num_iterations=12,
     actor_fc_layers=(128, 128),
     value_fc_layers=(128, 64),
     actor_learning_rate=3e-4,
     minibatch_size=504, # 4032(steps per episode) / 8
-    num_epochs=10,
+    num_epochs=8,
     # Agent params
     importance_ratio_clipping=0.2,
     lambda_value=0.95,
     discount_factor=0.99,
-    entropy_regularization=0.0,
+    entropy_regularization=0.01,
     value_pred_loss_coef=0.5,
     use_gae=True,
     use_td_lambda_return=True,
@@ -107,10 +108,12 @@ def train_eval(
     # For efficency, set metrics_path to None
     collect_env._metrics_path = None
     collect_env._occupancy_normalization_constant = 125.0
+    collect_env = ActionClipWrapper(collect_env)
     
     eval_env = load_environment(eval_scenario_config)
     eval_env._metrics_path = metrics_path
     eval_env._occupancy_normalization_constant = 125.0
+    eval_env = ActionClipWrapper(eval_env)
     
     observation_spec, action_spec, time_step_spec = spec_utils.get_tensor_specs(collect_env)
     train_step = train_utils.create_train_step()
@@ -151,7 +154,8 @@ def train_eval(
         train_step_counter=train_step,
         compute_value_and_advantage_in_train=False # when minibatch_size is used
     )
-    agent.collect_policy._clip=True # change clip parameter from TFPolicy parent class to clip action tensor
+    # agent.policy._clip = True
+    # agent.collect_policy._clip = True # change clip parameter from TFPolicy parent class to clip action tensor
     agent.initialize()
     
     sequence_length = int(eval_env.steps_per_episode)
@@ -205,7 +209,7 @@ def train_eval(
         rate_limiter_timeout_ms=1000,
     )
 
-    rb_observer = reverb_utils.ReverbTrajectorySequenceObserver(
+    rb_observer = reverb_utils.ReverbAddTrajectoryObserver(
         reverb_replay_train.py_client,
         ['training_table', 'normalization_table'],
         sequence_length=sequence_length,
@@ -256,7 +260,7 @@ def train_eval(
     
     # @title Define a TF-Agents Actor for collect and eval
     collect_render_plot_observer = RenderAndPlotObserver(
-    render_interval_steps=144, environment=collect_env
+        render_interval_steps=144, environment=collect_env
     )
     collect_print_status_observer = PrintStatusObserver(
         status_interval_steps=1,
@@ -279,7 +283,7 @@ def train_eval(
         collect_env,
         collect_policy,
         train_step,
-        steps_per_run=sequence_length,
+        steps_per_run=sequence_length * num_parallel_environments,
         metrics=actor.collect_metrics(1)+ [env_step_metric],
         reference_metrics=[env_step_metric],
         summary_dir=os.path.join(root_dir, learner.TRAIN_DIR),
@@ -301,7 +305,7 @@ def train_eval(
         eval_env,
         eval_greedy_policy,
         train_step,
-        episodes_per_run=1,
+        steps_per_run=sequence_length * num_parallel_environments,
         metrics=actor.eval_metrics(1),
         reference_metrics=[env_step_metric],
         summary_dir=os.path.join(root_dir, 'eval'),
@@ -314,14 +318,15 @@ def train_eval(
         print('Training iteration: ', iter)
         # Let the collect actor run, using its stochastic action selection policy.
         logging_info("Collecting.")
+        _ = collect_env.reset()
         collect_actor.run()
+        
+        rb_observer.flush()
+        rb_observer.reset()
         logging_info(
             'Executing gradient updates with %d frames.'
             %int(reverb_replay_train.num_frames())
         )
-        # Now, with the additional collectsteps in the replay buffer,
-        # allow the agent to make additional policy improvements.
-        rb_observer.reset(write_cached_steps=False)
         loss_info = agent_learner.run()
         logging_info(
             'Policy Gradient Loss: %6.2f, Value Estimation Loss: %6.2f, Clip Fraction: %6.2f '
@@ -337,12 +342,14 @@ def train_eval(
 
         logging_info('Evaluating.')
 
-        if iter % 4 == 0:
+        if iter % 5 == 0:
             _ = eval_env.reset()
             # Run the eval actor after the training iteration, and get its performance.
             eval_actor.run_and_log()
         
-    logging_info('')
+    _ = eval_env.reset()
+    # Run the eval actor after the training iteration, and get its performance.
+    eval_actor.run_and_log()
     rb_observer.close()
     reverb_server.stop()
 

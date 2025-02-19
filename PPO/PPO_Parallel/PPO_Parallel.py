@@ -31,6 +31,7 @@ from tf_agents.agents.ppo import ppo_actor_network
 from tf_agents.environments import ParallelPyEnvironment
 from tf_agents.environments import BatchedPyEnvironment
 from tf_agents.networks import value_network
+from tf_agents.environments import ActionClipWrapper
 
 from tf_agents.metrics import py_metrics
 from tf_agents.policies import greedy_policy
@@ -179,10 +180,12 @@ def train_eval(
     collect_env = ParallelPyEnvironment(
         [create_collect_env] * num_parallel_environments
     )
+    collect_env = ActionClipWrapper(collect_env)
     
     eval_env = load_environment(eval_scenario_config)
     eval_env._metrics_path = metrics_path
     eval_env._occupancy_normalization_constant = 125.0
+    eval_env = ActionClipWrapper(eval_env)
 
     observation_spec, action_spec, time_step_spec = spec_utils.get_tensor_specs(collect_env)
     train_step = train_utils.create_train_step()
@@ -223,7 +226,7 @@ def train_eval(
         train_step_counter=train_step,
         compute_value_and_advantage_in_train=False # when minibatch_size is used
     )
-    agent.collect_policy._clip=True # change clip parameter from TFPolicy parent class to clip action tensor
+    # agent.collect_policy._clip=True # change clip parameter from TFPolicy parent class to clip action tensor
     agent.initialize()
     
     sequence_length = int(eval_env.steps_per_episode)
@@ -284,7 +287,7 @@ def train_eval(
         num_epochs=num_epochs,
         triggers=learning_triggers,
         minibatch_size=minibatch_size,
-        shuffle_buffer_size=sequence_length,
+        shuffle_buffer_size=sequence_length * num_parallel_environments,
         summary_interval=summary_interval
     )
 
@@ -350,6 +353,7 @@ def train_eval(
         print('Training iteration: ', iter)
         # Let the collect actor run, using its stochastic action selection policy.
         logging_info("Collecting.")
+        collect_env.reset()
         collect_actor.run()
         logging_info(
             'Executing gradient updates with %d frames.'
